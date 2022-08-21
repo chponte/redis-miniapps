@@ -7,8 +7,10 @@ include(${CMAKE_BINARY_DIR}/conan_paths.cmake)
 find_package(hiredis)
 find_package(Boost)
 
-add_executable(${PROJECT_NAME} src/main.cpp)
-target_link_libraries(${PROJECT_NAME} hiredis::hiredis)
+include_directories(${CMAKE_HOME_DIRECTORY}/include)
 
-add_executable(redis-pubsub src/pubsub/main.cpp)
-target_link_libraries(redis-pubsub hiredis::hiredis Boost::boost)
+add_executable(pubsub-server src/pubsub-server/main.cpp)
+target_link_libraries(pubsub-server hiredis::hiredis Boost::boost)
+
+add_executable(pubsub-client src/pubsub-client/main.cpp)
+target_link_libraries(pubsub-client Boost::boost)
