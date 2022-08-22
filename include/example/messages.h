@@ -12,11 +12,13 @@ struct UsernameBlock
 {
     char username[maxUsernameLength + 1];
 
-    UsernameBlock() {
+    UsernameBlock()
+    {
         username[0] = '\0';
     }
 
-    UsernameBlock(std::string u){
+    UsernameBlock(std::string u)
+    {
         std::sprintf(username, "%s", u.c_str());
     }
 };
@@ -24,12 +26,12 @@ struct UsernameBlock
 struct MessageBlock
 {
     char message[maxMessageLength + 1];
+
+    MessageBlock()
+    {
+        message[0] = '\0';
+    }
 };
-
 }; // namespace example
-
-enum BlockType : uint8_t { none,
-                           username,
-                           message };
 
 #endif

@@ -38,18 +38,12 @@ void saveMessage(const std::string &msg) {}
 struct Connection
 {
     boost::asio::ip::tcp::socket socket;
-    boost::asio::streambuf read_buffer;
-
     std::string username;
 
     Connection(boost::asio::io_service &io_service)
-        : socket(io_service), read_buffer()
+        : socket(io_service)
     {
-    }
-
-    Connection(boost::asio::io_service &io_service, size_t max_buffer_size)
-        : socket(io_service), read_buffer(max_buffer_size)
-    {
+        username = "";
     }
 };
 
@@ -88,11 +82,6 @@ class Server
     void handle_accept(con_handle_t con_handle, boost::system::error_code const &err)
     {
         if (!err) {
-            // std::cout << "Connection from: " << con_handle->remote_endpoint().address().to_string() << "\n";
-            // std::cout << "Sending message\n";
-            // auto buff = std::make_shared<std::string>("Hello World!\r\n\r\n");
-            // auto handler = boost::bind(&Server::handle_write, this, con_handle, buff, boost::asio::placeholders::error);
-            // boost::asio::async_write(con_handle->socket, boost::asio::buffer(*buff), handler);
             do_async_read_username(con_handle);
         } else {
             std::cerr << "We had an error: " << err.message() << std::endl;
@@ -120,9 +109,11 @@ class Server
                               boost::system::error_code const &err, size_t bytes_transfered)
     {
         if (bytes_transfered == sizeof(example::UsernameBlock)) {
-            std::cout << "User " << ub->username << " joined\n";
-            con_handle->socket.close();
+            con_handle->username = std::string(ub->username);
+            std::cout << "User " << con_handle->username << " joined\n";
+            con_handle_t new_handle = m_accepted_con.insert(m_accepted_con.begin(), std::move(*con_handle));
             m_pending_con.erase(con_handle);
+            do_async_read_message(new_handle);
         } else {
             if (!err) {
                 // async_read returned less than the requested size
@@ -134,77 +125,77 @@ class Server
         }
     }
 
-    void do_async_read_username_2(con_handle_t con_handle)
+    void do_async_read_message(con_handle_t con_handle)
     {
-        auto handler = boost::bind(&Server::handle_read_username_2,
+        auto mb = std::make_shared<example::MessageBlock>();
+        auto handler = boost::bind(&Server::handle_read_message,
                                    this,
                                    con_handle,
+                                   mb,
                                    boost::asio::placeholders::error,
                                    boost::asio::placeholders::bytes_transferred);
-        int missing_bytes = (int)con_handle->username.size() - (int)con_handle->read_buffer.size();
         boost::asio::async_read(con_handle->socket,
-                                con_handle->read_buffer,
-                                boost::asio::transfer_exactly(std::max(0, missing_bytes)),
+                                boost::asio::buffer(mb.get(), sizeof(example::MessageBlock)),
+                                boost::asio::transfer_exactly(sizeof(example::MessageBlock)),
                                 handler);
     }
 
-    void handle_read_username_2(con_handle_t con_handle, boost::system::error_code const &err, size_t bytes_transfered)
+    void handle_read_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb,
+                             boost::system::error_code const &err, size_t bytes_transfered)
     {
-        if (bytes_transfered > 0 && con_handle->read_buffer.size() >= con_handle->username.size()) {
-            std::istream is(&con_handle->read_buffer);
-            is.read(con_handle->username.data(), con_handle->username.size());
-            cout << "User " << con_handle->username << " joined the chat" << endl;
-
+        if (bytes_transfered == sizeof(example::MessageBlock)) {
+            cout << "User " << con_handle->username << " sent message: " << mb->message << endl;
             con_handle->socket.close();
-            m_pending_con.erase(con_handle);
+            m_accepted_con.erase(con_handle);
         } else {
             if (!err) {
-                do_async_read_username_2(con_handle);
+                // async_read returned less than the requested size
+                std::cerr << "Boost returned incomplete MessageBlock, closing connection\n";
             } else {
                 std::cerr << "We had an error: " << err.message() << std::endl;
-                m_pending_con.erase(con_handle);
             }
-        }
-    }
-
-    void do_async_read(con_handle_t con_handle)
-    {
-        auto handler = boost::bind(&Server::handle_read, this, con_handle,
-                                   boost::asio::placeholders::error,
-                                   boost::asio::placeholders::bytes_transferred);
-        boost::asio::async_read_until(con_handle->socket, con_handle->read_buffer, "\n", handler);
-    }
-
-    void handle_read(con_handle_t con_handle, boost::system::error_code const &err, size_t bytes_transfered)
-    {
-        if (bytes_transfered > 0) {
-            std::istream is(&con_handle->read_buffer);
-            std::string line;
-            std::getline(is, line);
-        }
-
-        if (!err) {
-            do_async_read(con_handle);
-        } else {
-            std::cerr << "We had an error: " << err.message() << std::endl;
             m_accepted_con.erase(con_handle);
         }
     }
 
-    void handle_write(con_handle_t con_handle,
-                      std::shared_ptr<std::string> msg_buffer,
-                      boost::system::error_code const &err)
-    {
-        if (!err) {
-            std::cout << "Finished sending message\n";
-            if (con_handle->socket.is_open()) {
-                // Write completed successfully and connection is open
-            }
-        } else {
-            std::cerr << "We had an error: " << err.message() << std::endl;
-            m_accepted_con.erase(con_handle);
-        }
-    }
+    // void do_async_read(con_handle_t con_handle)
+    // {
+    //     auto handler = boost::bind(&Server::handle_read, this, con_handle,
+    //                                boost::asio::placeholders::error,
+    //                                boost::asio::placeholders::bytes_transferred);
+    //     boost::asio::async_read_until(con_handle->socket, con_handle->read_buffer, "\n", handler);
+    // }
+
+    // void handle_read(con_handle_t con_handle, boost::system::error_code const &err, size_t bytes_transfered)
+    // {
+    //     if (bytes_transfered > 0) {
+    //         std::istream is(&con_handle->read_buffer);
+    //         std::string line;
+    //         std::getline(is, line);
+    //     }
+
+    //     if (!err) {
+    //         do_async_read(con_handle);
+    //     } else {
+    //         std::cerr << "We had an error: " << err.message() << std::endl;
+    //         m_accepted_con.erase(con_handle);
+    //     }
+    // }
+
+    // void handle_write(con_handle_t con_handle,
+    //                   std::shared_ptr<std::string> msg_buffer,
+    //                   boost::system::error_code const &err)
+    // {
+    //     if (!err) {
+    //         std::cout << "Finished sending message\n";
+    //         if (con_handle->socket.is_open()) {
+    //             // Write completed successfully and connection is open
+    //         }
+    //     } else {
+    //         std::cerr << "We had an error: " << err.message() << std::endl;
+    //         m_accepted_con.erase(con_handle);
+    //     }
+    // }
 };
 
 /*
