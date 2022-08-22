@@ -6,10 +6,10 @@
 #include <list>
 
 #include <boost/asio.hpp>
-#include <boost/bind.hpp>
+#include <boost/bind/bind.hpp>
 #include <hiredis/hiredis.h>
 
-#include <messages.h>
+#include <example/messages.h>
 
 using namespace boost::asio;
 using ip::tcp;
@@ -93,7 +93,7 @@ class Server
             // auto buff = std::make_shared<std::string>("Hello World!\r\n\r\n");
             // auto handler = boost::bind(&Server::handle_write, this, con_handle, buff, boost::asio::placeholders::error);
             // boost::asio::async_write(con_handle->socket, boost::asio::buffer(*buff), handler);
-            do_async_read_username_1(con_handle);
+            do_async_read_username(con_handle);
         } else {
             std::cerr << "We had an error: " << err.message() << std::endl;
             m_pending_con.erase(con_handle);
@@ -101,40 +101,36 @@ class Server
         start_accept();
     }
 
-    void do_async_read_username_1(con_handle_t con_handle)
+    void do_async_read_username(con_handle_t con_handle)
     {
-        auto handler = boost::bind(&Server::handle_read_username1,
+        auto ub = std::make_shared<example::UsernameBlock>();
+        auto handler = boost::bind(&Server::handle_read_username,
                                    this,
                                    con_handle,
+                                   ub,
                                    boost::asio::placeholders::error,
                                    boost::asio::placeholders::bytes_transferred);
         boost::asio::async_read(con_handle->socket,
-                                con_handle->read_buffer,
-                                boost::asio::transfer_exactly(1),
+                                boost::asio::buffer(ub.get(), sizeof(example::UsernameBlock)),
+                                boost::asio::transfer_exactly(sizeof(example::UsernameBlock)),
                                 handler);
     }
 
-    void handle_read_username1(con_handle_t con_handle, boost::system::error_code const &err, size_t bytes_transfered)
+    void handle_read_username(con_handle_t con_handle, std::shared_ptr<example::UsernameBlock> ub,
+                              boost::system::error_code const &err, size_t bytes_transfered)
     {
-        if (bytes_transfered > 0) {
-            std::istream is(&con_handle->read_buffer);
-            uint8_t user_size;
-            is >> user_size;
-            if (user_size > 32) {
-                con_handle->socket.close();
-                m_pending_con.erase(con_handle);
-                cout << "Username too long: " << (uint32_t)user_size << endl;
-            } else {
-                con_handle->username.resize(user_size);
-                do_async_read_username_2(con_handle);
-            }
+        if (bytes_transfered == sizeof(example::UsernameBlock)) {
+            std::cout << "User " << ub->username << " joined\n";
+            con_handle->socket.close();
+            m_pending_con.erase(con_handle);
         } else {
             if (!err) {
-                do_async_read_username_1(con_handle);
+                // async_read returned less than the requested size
+                std::cerr << "Boost returned incomplete UsernameBlock, closing connection\n";
             } else {
                 std::cerr << "We had an error: " << err.message() << std::endl;
-                m_pending_con.erase(con_handle);
             }
+            m_pending_con.erase(con_handle);
         }
     }
 
@@ -157,7 +153,7 @@ class Server
         if (bytes_transfered > 0 && con_handle->read_buffer.size() >= con_handle->username.size()) {
             std::istream is(&con_handle->read_buffer);
             is.read(con_handle->username.data(), con_handle->username.size());
-            cout << "User " << con_handle->username  << " joined the chat" << endl;
+            cout << "User " << con_handle->username << " joined the chat" << endl;
 
             con_handle->socket.close();
             m_pending_con.erase(con_handle);
