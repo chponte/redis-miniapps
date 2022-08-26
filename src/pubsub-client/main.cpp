@@ -7,13 +7,15 @@
 
 #include <example/messages.h>
 
+using namespace boost::asio;
+
 class PubSubClient
 {
-    boost::asio::io_service m_ioservice;
-    boost::asio::ip::tcp::socket m_socket;
-    boost::asio::posix::stream_descriptor m_input;
+    io_service m_ioservice;
+    ip::tcp::socket m_socket;
+    posix::stream_descriptor m_input;
     std::string m_username;
-    boost::asio::streambuf m_line_buffer;
+    streambuf m_line_buffer;
 
   public:
     PubSubClient(std::string username) : m_ioservice(), m_socket(m_ioservice),
@@ -22,7 +24,7 @@ class PubSubClient
 
     void connect(char *address, uint16_t port)
     {
-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string(address), port);
+        ip::tcp::endpoint endpoint(ip::address::from_string(address), port);
         m_socket.connect(endpoint);
         do_async_read_line();
         do_async_recv_message();
@@ -40,16 +42,16 @@ class PubSubClient
     {
         // send username
         auto ub = example::UsernameBlock(m_username);
-        m_socket.send(boost::asio::buffer(&ub, sizeof(example::UsernameBlock)));
+        m_socket.send(buffer(&ub, sizeof(example::UsernameBlock)));
     }
 
     void do_async_read_line()
     {
         auto handler = boost::bind(&PubSubClient::handle_read_line,
                                    this,
-                                   boost::asio::placeholders::error,
-                                   boost::asio::placeholders::bytes_transferred);
-        boost::asio::async_read_until(m_input, m_line_buffer, '\n', handler);
+                                   placeholders::error,
+                                   placeholders::bytes_transferred);
+        async_read_until(m_input, m_line_buffer, '\n', handler);
     }
 
     void handle_read_line(boost::system::error_code const &err, size_t bytes_read)
@@ -58,16 +60,18 @@ class PubSubClient
         if (!err) {
             m_line_buffer.sgetn(buffer->message, bytes_read);
             buffer->message[bytes_read - 1] = '\0'; // replace newline with end of string
-            std::cout << "Read message: " << buffer->message << std::endl;
+            // std::cout << "Read message: " << buffer->message << std::endl;
             do_async_send_message(buffer);
             do_async_read_line();
-        } else if (err == boost::asio::error::not_found) {
+        } else if (err == error::not_found) {
             std::cerr << "Warning: message too long, it will be split in chunks" << std::endl;
             m_line_buffer.sgetn(buffer->message, example::maxMessageLength);
             buffer->message[example::maxMessageLength] = '\0';
-            std::cout << "Read max message: " << buffer->message << std::endl;
+            // std::cout << "Read max message: " << buffer->message << std::endl;
             do_async_send_message(buffer);
             do_async_read_line();
+        } else if (err == error::eof) {
+            exit(0);
         } else {
             std::cerr << "We had an error: " << err.message() << std::endl;
             exit(1);
@@ -79,8 +83,8 @@ class PubSubClient
         auto handler = boost::bind(&PubSubClient::handle_write_message,
                                    this,
                                    mb,
-                                   boost::asio::placeholders::error);
-        boost::asio::async_write(m_socket, boost::asio::buffer(mb.get(), sizeof(example::MessageBlock)), handler);
+                                   placeholders::error);
+        async_write(m_socket, buffer(mb.get(), sizeof(example::MessageBlock)), handler);
     }
 
     void handle_write_message(std::shared_ptr<example::MessageBlock>, boost::system::error_code const &err)
@@ -93,15 +97,35 @@ class PubSubClient
 
     void do_async_recv_message()
     {
+        auto mb = std::make_shared<example::MessageBlock>();
+        auto handler = boost::bind(&PubSubClient::handle_read_message,
+                                   this,
+                                   mb,
+                                   placeholders::error,
+                                   placeholders::bytes_transferred);
+        async_read(m_socket,
+                   buffer(mb.get(), sizeof(example::MessageBlock)),
+                   transfer_exactly(sizeof(example::MessageBlock)),
+                   handler);
     }
 
-    void handle_write(std::shared_ptr<example::UsernameBlock> msg_buffer,
-                      boost::system::error_code const &err)
+    void handle_read_message(std::shared_ptr<example::MessageBlock> mb, boost::system::error_code const &err,
+                             size_t bytes_transfered)
     {
-        if (!err) {
-            std::cout << "Finished sending message\n";
+        if (bytes_transfered == sizeof(example::MessageBlock)) {
+            std::cout << mb->username << " : " << mb->message << "\n";
+            do_async_recv_message();
         } else {
-            std::cerr << "We had an error: " << err.message() << std::endl;
+            if (err) {
+                if (err == error::eof) {
+                    std::cerr << "Server disconnected\n";
+                } else {
+                    std::cerr << "We had an error: " << err.message() << std::endl;
+                }
+            } else {
+                std::cerr << "Boost returned incomplete MessageBlock, closing connection\n";
+            }
+            exit(1);
         }
     }
 };

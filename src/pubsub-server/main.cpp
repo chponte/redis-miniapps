@@ -12,9 +12,6 @@
 #include <example/messages.h>
 
 using namespace boost::asio;
-using ip::tcp;
-using std::cout;
-using std::endl;
 
 redisContext *setupContext(char *address, char *port)
 {
@@ -49,8 +46,8 @@ struct Connection
 
 class Server
 {
-    boost::asio::io_service m_ioservice;
-    boost::asio::ip::tcp::acceptor m_acceptor;
+    io_service m_ioservice;
+    ip::tcp::acceptor m_acceptor;
     std::list<Connection> m_pending_con;
     std::list<Connection> m_accepted_con;
     using con_handle_t = std::list<Connection>::iterator;
@@ -64,9 +61,9 @@ class Server
 
     void listen(uint16_t port)
     {
-        auto endpoint = boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port);
+        auto endpoint = ip::tcp::endpoint(ip::tcp::v4(), port);
         m_acceptor.open(endpoint.protocol());
-        m_acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
+        m_acceptor.set_option(ip::tcp::acceptor::reuse_address(true));
         m_acceptor.bind(endpoint);
         m_acceptor.listen();
         start_accept();
@@ -75,7 +72,7 @@ class Server
     void start_accept()
     {
         auto con_handle = m_pending_con.emplace(m_pending_con.begin(), m_ioservice);
-        auto handler = boost::bind(&Server::handle_accept, this, con_handle, boost::asio::placeholders::error);
+        auto handler = boost::bind(&Server::handle_accept, this, con_handle, placeholders::error);
         m_acceptor.async_accept(con_handle->socket, handler);
     }
 
@@ -84,7 +81,7 @@ class Server
         if (!err) {
             do_async_read_username(con_handle);
         } else {
-            std::cerr << "We had an error: " << err.message() << std::endl;
+            std::cerr << "We had an error: " << err.message() << "\n";
             m_pending_con.erase(con_handle);
         }
         start_accept();
@@ -97,12 +94,12 @@ class Server
                                    this,
                                    con_handle,
                                    ub,
-                                   boost::asio::placeholders::error,
-                                   boost::asio::placeholders::bytes_transferred);
-        boost::asio::async_read(con_handle->socket,
-                                boost::asio::buffer(ub.get(), sizeof(example::UsernameBlock)),
-                                boost::asio::transfer_exactly(sizeof(example::UsernameBlock)),
-                                handler);
+                                   placeholders::error,
+                                   placeholders::bytes_transferred);
+        async_read(con_handle->socket,
+                   buffer(ub.get(), sizeof(example::UsernameBlock)),
+                   transfer_exactly(sizeof(example::UsernameBlock)),
+                   handler);
     }
 
     void handle_read_username(con_handle_t con_handle, std::shared_ptr<example::UsernameBlock> ub,
@@ -118,8 +115,10 @@ class Server
             if (!err) {
                 // async_read returned less than the requested size
                 std::cerr << "Boost returned incomplete UsernameBlock, closing connection\n";
+            } else if (err == error::eof) {
+                std::cout << "Connection aborted prematurely\n";
             } else {
-                std::cerr << "We had an error: " << err.message() << std::endl;
+                std::cerr << "We had an error: " << err.message() << "\n";
             }
             m_pending_con.erase(con_handle);
         }
@@ -132,70 +131,64 @@ class Server
                                    this,
                                    con_handle,
                                    mb,
-                                   boost::asio::placeholders::error,
-                                   boost::asio::placeholders::bytes_transferred);
-        boost::asio::async_read(con_handle->socket,
-                                boost::asio::buffer(mb.get(), sizeof(example::MessageBlock)),
-                                boost::asio::transfer_exactly(sizeof(example::MessageBlock)),
-                                handler);
+                                   placeholders::error,
+                                   placeholders::bytes_transferred);
+        async_read(con_handle->socket,
+                   buffer(mb.get(), sizeof(example::MessageBlock)),
+                   transfer_exactly(sizeof(example::MessageBlock)),
+                   handler);
     }
 
     void handle_read_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb,
                              boost::system::error_code const &err, size_t bytes_transfered)
     {
         if (bytes_transfered == sizeof(example::MessageBlock)) {
-            cout << "User " << con_handle->username << " sent message: " << mb->message << endl;
-            con_handle->socket.close();
-            m_accepted_con.erase(con_handle);
+            strcpy(mb->username, con_handle->username.c_str());
+            std::cout << "User " << mb->username << " sent message: " << mb->message << "\n";
+            for (auto it = m_accepted_con.begin(); it != m_accepted_con.end(); ++it) {
+                if (it == con_handle) {
+                    continue;
+                }
+                do_async_send_message(it, mb);
+            }
+            do_async_read_message(con_handle);
         } else {
             if (!err) {
                 // async_read returned less than the requested size
                 std::cerr << "Boost returned incomplete MessageBlock, closing connection\n";
+            }
+            if (err == error::eof) {
+                std::cout << con_handle->username << " disconnected\n";
             } else {
-                std::cerr << "We had an error: " << err.message() << std::endl;
+                std::cerr << "We had an error: " << err.message() << "\n";
             }
             m_accepted_con.erase(con_handle);
         }
     }
 
-    // void do_async_read(con_handle_t con_handle)
-    // {
-    //     auto handler = boost::bind(&Server::handle_read, this, con_handle,
-    //                                boost::asio::placeholders::error,
-    //                                boost::asio::placeholders::bytes_transferred);
-    //     boost::asio::async_read_until(con_handle->socket, con_handle->read_buffer, "\n", handler);
-    // }
+    void do_async_send_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb)
+    {
+        auto ub = std::make_shared<example::UsernameBlock>();
+        auto handler = boost::bind(&Server::handle_send_message,
+                                   this,
+                                   con_handle,
+                                   mb,
+                                   placeholders::error,
+                                   placeholders::bytes_transferred);
+        async_write(con_handle->socket, buffer(mb.get(), sizeof(example::MessageBlock)), handler);
+    }
 
-    // void handle_read(con_handle_t con_handle, boost::system::error_code const &err, size_t bytes_transfered)
-    // {
-    //     if (bytes_transfered > 0) {
-    //         std::istream is(&con_handle->read_buffer);
-    //         std::string line;
-    //         std::getline(is, line);
-    //     }
-
-    //     if (!err) {
-    //         do_async_read(con_handle);
-    //     } else {
-    //         std::cerr << "We had an error: " << err.message() << std::endl;
-    //         m_accepted_con.erase(con_handle);
-    //     }
-    // }
-
-    // void handle_write(con_handle_t con_handle,
-    //                   std::shared_ptr<std::string> msg_buffer,
-    //                   boost::system::error_code const &err)
-    // {
-    //     if (!err) {
-    //         std::cout << "Finished sending message\n";
-    //         if (con_handle->socket.is_open()) {
-    //             // Write completed successfully and connection is open
-    //         }
-    //     } else {
-    //         std::cerr << "We had an error: " << err.message() << std::endl;
-    //         m_accepted_con.erase(con_handle);
-    //     }
-    // }
+    void handle_send_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb,
+                             boost::system::error_code const &err, size_t bytes_transfered)
+    {
+        if (err) {
+            std::cerr << "We had an error: " << err.message() << "\n";
+            con_handle->socket.close();
+            m_accepted_con.erase(con_handle);
+        } else if (bytes_transfered != sizeof(example::MessageBlock)) {
+            std::cerr << "Boost sent incomplete MessageBlock, closing connection\n";
+        }
+    }
 };
 
 /*
