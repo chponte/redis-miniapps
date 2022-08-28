@@ -3,65 +3,102 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <latch>
 #include <list>
 
 #include <boost/asio.hpp>
 #include <boost/bind/bind.hpp>
-#include <hiredis/hiredis.h>
+#include <boost/json.hpp>
+#include <hiredis/async.h>
 
 #include <example/messages.h>
 
 using namespace boost::asio;
 
-redisContext *setupContext(char *address, char *port)
+class redis_handler
 {
-    redisContext *c = redisConnect(address, std::atoi(port));
-    if (c == nullptr || c->err) {
-        if (c) {
-            std::printf("Error: %s\n", c->errstr);
-            // handle error
-        } else {
-            std::printf("Can't allocate redis context\n");
-        }
-        exit(1);
-    }
-    return c;
-}
-
-void getMessages() {}
-
-void saveMessage(const std::string &msg) {}
-
-struct Connection
-{
-    boost::asio::ip::tcp::socket socket;
-    std::string username;
-
-    Connection(boost::asio::io_service &io_service)
-        : socket(io_service)
-    {
-        username = "";
-    }
-};
-
-class Server
-{
-    io_service m_ioservice;
-    ip::tcp::acceptor m_acceptor;
-    std::list<Connection> m_pending_con;
-    std::list<Connection> m_accepted_con;
-    using con_handle_t = std::list<Connection>::iterator;
 
   public:
-    Server() : m_ioservice(), m_acceptor(m_ioservice), m_pending_con(), m_accepted_con() {}
+    redis_handler(pub_sub_logic *p_logic) : m_logic(p_logic), m_redis_ctx(nullptr)
+    {
+        m_logic->redis_handler(this);
+    }
+
+    ~redis_handler()
+    {
+        if (m_redis_ctx != nullptr) {
+            redisAsyncFree(m_redis_ctx);
+        }
+    }
+
+    void connect(const std::string &address, const std::string &port)
+    {
+        m_redis_ctx = redisAsyncConnect(address.c_str(), std::atoi(port.c_str()));
+        std::cout << "Async connect\n";
+        std::latch barrier{1};
+        if (m_redis_ctx->err) {
+            std::cerr << "Error: " << m_redis_ctx->errstr << "\n";
+            exit(1);
+        }
+        m_redis_ctx->data = &barrier;
+        redisAsyncSetConnectCallback(m_redis_ctx, [](const redisAsyncContext *c, int status) {
+            std::cout << "Counting down\n";
+            ((std::latch *)c->data)->count_down();
+        });
+        // Wait until connection completes
+        barrier.wait();
+        m_redis_ctx->data = nullptr;
+        std::cout << "Connection completed\n";
+        // redisAsyncSetDisconnectCallback(m_redis_ctx, appOnDisconnect);
+    }
+
+    // void getMessages(uint32_t count) {
+    //     reply = redisCommand(m_redis, "LRANGE mylist 0 -1");
+    //     if (reply->type == REDIS_REPLY_ARRAY) {
+    //         for (j = 0; j < reply->elements; j++) {
+    //             printf("%u) %s\n", j, reply->element[j]->str);
+    //         }
+    //     }
+    //     freeReplyObject(reply);
+    // }
+
+    // void saveMessage(const std::string &value) {
+    //     std::string cmd = "LPUSH chatroom " + value;
+    //     auto reply = redisCommand(m_redis, cmd.c_str());
+
+    // }
+
+  private:
+    pub_sub_logic *m_logic;
+    redisAsyncContext *m_redis_ctx;
+};
+
+struct tcp_connection
+{
+    ip::tcp::socket socket;
+
+    tcp_connection(io_service &io_service) : socket(io_service) {}
+};
+
+using con_handle_t = std::list<tcp_connection>::iterator;
+
+class tcp_handler
+{
+    pub_sub_logic *m_logic;
+    io_service m_ioservice;
+    ip::tcp::acceptor m_acceptor;
+    std::list<tcp_connection> m_conn;
+
+  public:
+    tcp_handler(pub_sub_logic *p_logic) : m_logic(p_logic), m_ioservice(), m_acceptor(m_ioservice), m_conn() {}
 
     void run() { m_ioservice.run(); }
 
     void stop() { m_ioservice.stop(); }
 
-    void listen(uint16_t port)
+    void listen(const char *p_address, const char *p_port)
     {
-        auto endpoint = ip::tcp::endpoint(ip::tcp::v4(), port);
+        auto endpoint = ip::tcp::endpoint(ip::tcp::v4(), std::atoi(p_port));
         m_acceptor.open(endpoint.protocol());
         m_acceptor.set_option(ip::tcp::acceptor::reuse_address(true));
         m_acceptor.bind(endpoint);
@@ -71,130 +108,177 @@ class Server
 
     void start_accept()
     {
-        auto con_handle = m_pending_con.emplace(m_pending_con.begin(), m_ioservice);
-        auto handler = boost::bind(&Server::handle_accept, this, con_handle, placeholders::error);
+        auto con_handle = m_conn.emplace(m_conn.begin(), m_ioservice);
+        auto handler = boost::bind(&tcp_handler::handle_accept, this, con_handle, placeholders::error);
         m_acceptor.async_accept(con_handle->socket, handler);
     }
 
-    void handle_accept(con_handle_t con_handle, boost::system::error_code const &err)
+    void handle_accept(con_handle_t p_con_handle, boost::system::error_code const &p_err)
     {
-        if (!err) {
-            do_async_read_username(con_handle);
+        if (!p_err) {
+            m_logic->new_tcp_connection(p_con_handle);
         } else {
-            std::cerr << "We had an error: " << err.message() << "\n";
-            m_pending_con.erase(con_handle);
+            std::cerr << "We had an error: " << p_err.message() << "\n";
+            m_conn.erase(p_con_handle);
         }
         start_accept();
     }
 
-    void do_async_read_username(con_handle_t con_handle)
+    void do_async_read_username(con_handle_t p_con_handle)
     {
         auto ub = std::make_shared<example::UsernameBlock>();
-        auto handler = boost::bind(&Server::handle_read_username,
+        auto handler = boost::bind(&tcp_handler::handle_read_username,
                                    this,
-                                   con_handle,
+                                   p_con_handle,
                                    ub,
                                    placeholders::error,
                                    placeholders::bytes_transferred);
-        async_read(con_handle->socket,
+        async_read(p_con_handle->socket,
                    buffer(ub.get(), sizeof(example::UsernameBlock)),
                    transfer_exactly(sizeof(example::UsernameBlock)),
                    handler);
     }
 
-    void handle_read_username(con_handle_t con_handle, std::shared_ptr<example::UsernameBlock> ub,
-                              boost::system::error_code const &err, size_t bytes_transfered)
+    void handle_read_username(con_handle_t p_con_handle, std::shared_ptr<example::UsernameBlock> p_ub,
+                              const boost::system::error_code &p_err, size_t p_bytes_transfered)
     {
-        if (bytes_transfered == sizeof(example::UsernameBlock)) {
-            con_handle->username = std::string(ub->username);
-            std::cout << "User " << con_handle->username << " joined\n";
-            con_handle_t new_handle = m_accepted_con.insert(m_accepted_con.begin(), std::move(*con_handle));
-            m_pending_con.erase(con_handle);
-            do_async_read_message(new_handle);
+        if (p_bytes_transfered == sizeof(example::UsernameBlock)) {
+            m_logic->recv_username(p_con_handle, p_ub);
         } else {
-            if (!err) {
+            if (!p_err) {
                 // async_read returned less than the requested size
                 std::cerr << "Boost returned incomplete UsernameBlock, closing connection\n";
-            } else if (err == error::eof) {
+            } else if (p_err == error::eof) {
                 std::cout << "Connection aborted prematurely\n";
             } else {
-                std::cerr << "We had an error: " << err.message() << "\n";
+                std::cerr << "We had an error: " << p_err.message() << "\n";
             }
-            m_pending_con.erase(con_handle);
+            m_conn.erase(p_con_handle);
         }
     }
 
-    void do_async_read_message(con_handle_t con_handle)
+    // void send_previous_messages(con_handle_t con_handle, uint32_t count)
+    // {
+
+    //     // do_redis_request;
+    //     // for (int i = 0; i < size; ++i){
+    //     auto mb = std::make_shared<example::MessageBlock>();
+    //     // set message content;
+    //     auto handler = boost::bind(&PubSubServer::handle_send_message,
+    //                                this,
+    //                                con_handle,
+    //                                mb,
+    //                                placeholders::error,
+    //                                placeholders::bytes_transferred);
+    //     async_write(con_handle->socket, buffer(mb.get(), sizeof(example::MessageBlock)), handler);
+    //     // }
+    // }
+
+    void do_async_read_message(con_handle_t p_con_handle, std::string p_user)
     {
         auto mb = std::make_shared<example::MessageBlock>();
-        auto handler = boost::bind(&Server::handle_read_message,
+        auto handler = boost::bind(&tcp_handler::handle_read_message,
                                    this,
-                                   con_handle,
+                                   p_con_handle,
                                    mb,
+                                   p_user,
                                    placeholders::error,
                                    placeholders::bytes_transferred);
-        async_read(con_handle->socket,
+        async_read(p_con_handle->socket,
                    buffer(mb.get(), sizeof(example::MessageBlock)),
                    transfer_exactly(sizeof(example::MessageBlock)),
                    handler);
     }
 
-    void handle_read_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb,
-                             boost::system::error_code const &err, size_t bytes_transfered)
+    void handle_read_message(con_handle_t p_con_handle, std::shared_ptr<example::MessageBlock> p_mb, std::string p_user,
+                             boost::system::error_code const &p_err, size_t p_bytes_transfered)
     {
-        if (bytes_transfered == sizeof(example::MessageBlock)) {
-            strcpy(mb->username, con_handle->username.c_str());
-            std::cout << "User " << mb->username << " sent message: " << mb->message << "\n";
-            for (auto it = m_accepted_con.begin(); it != m_accepted_con.end(); ++it) {
-                if (it == con_handle) {
-                    continue;
-                }
-                do_async_send_message(it, mb);
-            }
-            do_async_read_message(con_handle);
+        if (p_bytes_transfered == sizeof(example::MessageBlock)) {
+            m_logic->recv_message(p_user, p_mb);
         } else {
-            if (!err) {
+            if (!p_err) {
                 // async_read returned less than the requested size
                 std::cerr << "Boost returned incomplete MessageBlock, closing connection\n";
             }
-            if (err == error::eof) {
-                std::cout << con_handle->username << " disconnected\n";
+            if (p_err == error::eof) {
+                std::cout << p_con_handle->username << " disconnected\n";
             } else {
-                std::cerr << "We had an error: " << err.message() << "\n";
+                std::cerr << "We had an error: " << p_err.message() << "\n";
             }
-            m_accepted_con.erase(con_handle);
+            m_conn.erase(p_con_handle);
         }
     }
 
-    void do_async_send_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb)
+    void do_async_send_message(con_handle_t p_con_handle, std::shared_ptr<example::MessageBlock> p_mb)
     {
-        auto ub = std::make_shared<example::UsernameBlock>();
-        auto handler = boost::bind(&Server::handle_send_message,
+        auto handler = boost::bind(&tcp_handler::handle_send_message,
                                    this,
-                                   con_handle,
-                                   mb,
+                                   p_con_handle,
+                                   p_mb,
                                    placeholders::error,
                                    placeholders::bytes_transferred);
-        async_write(con_handle->socket, buffer(mb.get(), sizeof(example::MessageBlock)), handler);
+        async_write(p_con_handle->socket, buffer(p_mb.get(), sizeof(example::MessageBlock)), handler);
     }
 
-    void handle_send_message(con_handle_t con_handle, std::shared_ptr<example::MessageBlock> mb,
-                             boost::system::error_code const &err, size_t bytes_transfered)
+    void handle_send_message(con_handle_t p_con_handle, std::shared_ptr<example::MessageBlock> p_mb,
+                             boost::system::error_code const &p_err, size_t p_bytes_transfered)
     {
-        if (err) {
-            std::cerr << "We had an error: " << err.message() << "\n";
-            con_handle->socket.close();
-            m_accepted_con.erase(con_handle);
-        } else if (bytes_transfered != sizeof(example::MessageBlock)) {
+        if (p_err) {
+            std::cerr << "We had an error: " << p_err.message() << "\n";
+            p_con_handle->socket.close();
+            m_conn.erase(p_con_handle);
+        } else if (p_bytes_transfered != sizeof(example::MessageBlock)) {
             std::cerr << "Boost sent incomplete MessageBlock, closing connection\n";
         }
     }
 };
 
-/*
-Arguments: ip, port, username
+class pub_sub_logic
+{
+  public:
+    pub_sub_logic() : m_redis_handler(nullptr), m_tcp_handler(nullptr) {}
 
-*/
+    void set_redis_handler(redis_handler *p_redis_handler)
+    {
+        m_redis_handler = p_redis_handler;
+    }
+
+    void set_tcp_handler(tcp_handler *p_tcp_handler)
+    {
+        m_tcp_handler = p_tcp_handler;
+    }
+
+    void new_tcp_connection(con_handle_t p_conn_handle)
+    {
+        m_tcp_handler->do_async_read_username(p_conn_handle);
+    }
+
+    void recv_username(con_handle_t p_conn_handle, std::shared_ptr<example::UsernameBlock> p_ub)
+    {
+        m_users[std::string(p_ub->username)] = p_conn_handle;
+        m_tcp_handler->do_async_read_message(p_conn_handle);
+    }
+
+    void recv_message(std::string p_user, std::shared_ptr<example::MessageBlock> p_mb)
+    {
+        for (auto it = m_accepted_con.begin(); it != m_accepted_con.end(); ++it) {
+            if (it == p_con_handle) {
+                continue;
+            }
+            do_async_send_message(it, p_mb);
+        }
+        do_async_read_message(p_con_handle);
+    }
+
+    void send_message()
+    {
+    }
+
+  private:
+    redis_handler *m_redis_handler;
+    tcp_handler *m_tcp_handler;
+    std::unordered_map<std::string, con_handle_t> m_users;
+};
 
 int main(int argc, char **argv)
 {
@@ -203,29 +287,12 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    // redisContext *c = setupContext(argv[1], argv[2]);
+    auto
 
-    auto srv = Server();
-    srv.listen(std::atoi(argv[2]));
-
-    // std::signal(SIGINT, [&srv](int signal) { srv.stop(); });
-
+        auto srv = PubSubServer();
+    srv.connect_redis(argv[3], argv[4]);
+    srv.listen(argv[1], argv[2]);
     srv.run();
-
-    // redisFree(c);
-
-    // boost::asio::streambuf buf;
-
-    // redisReply *reply;
-
-    // getMessages();
-
-    // while (!terminate) {
-    //     std::string msg;
-    //     std::getline(std::cin, msg);
-    //     saveMessage(msg);
-    //     std::cout << msg << "\n";
-    // }
 
     return 0;
 }

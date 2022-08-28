@@ -10,7 +10,7 @@ find_package(Boost)
 include_directories(${CMAKE_HOME_DIRECTORY}/include)
 
 add_executable(pubsub-server src/pubsub-server/main.cpp)
-target_link_libraries(pubsub-server hiredis::hiredis Boost::boost)
+target_link_libraries(pubsub-server hiredis::hiredis Boost::boost Boost::json)
 
 add_executable(pubsub-client src/pubsub-client/main.cpp)
 target_link_libraries(pubsub-client Boost::boost)
